@@ -1,4 +1,4 @@
-// ✅ Streamlined GPS tracker focused on live tracking
+// ✅ Streamlined GPS tracker focused on live tracking with camera follow
 
 // 🌍 Scaling factor (adjust this to match your 3D model scale)
 const WORLD_SCALE = 1;  // Starting scale factor
@@ -10,6 +10,8 @@ let gpsPathPoints = [];
 let watchId = null;
 let lastPosition = null; // Stores the complete position object
 let calibrationFactor = 0.6163;
+let followMode = true; // Camera follows the marker by default
+let viewMode = 'navigation'; // 'navigation', 'top', or 'first-person'
 
 // Reference point for calibration
 const REFERENCE_LATITUDE = 8.5644027;
@@ -30,7 +32,10 @@ const GPS_CONFIG = {
     smoothingFactor: 0.3,
     useHighAccuracy: true,
     showAccuracyRing: true,
-    showPath: true
+    showPath: true,
+    cameraFollowSmoothing: 0.1, // Lower values = smoother but slower camera movement
+    cameraFollowHeight: 50,     // Height of camera above marker
+    cameraFollowDistance: 30    // Distance behind marker
 };
 
 /**
@@ -63,16 +68,31 @@ function geoToWorld(latitude, longitude) {
 }
 
 function setupGPSMarker() {
-    // Create visual GPS marker (a floating blimp/sphere)
-    const blimpGeometry = new THREE.SphereGeometry(GPS_CONFIG.markerSize, 16, 16);
-    const blimpMaterial = new THREE.MeshBasicMaterial({ color: GPS_CONFIG.markerColor });
-    gpsMarker = new THREE.Mesh(blimpGeometry, blimpMaterial);
-    gpsMarker.position.y = GPS_CONFIG.markerHeight;
-    gpsMarker.castShadow = true;
-    gpsMarker.visible = false;
-    scene.add(gpsMarker);
+    // ✅ Create the pinpoint marker (a cone with a small sphere on top)
+    const markerGroup = new THREE.Group();
+    markerGroup.name = 'gpsMarker';
 
-    // Create accuracy circle
+    // Cone for the "pin"
+    const coneGeometry = new THREE.ConeGeometry(3, 10, 16);  // radius, height, segments
+    const coneMaterial = new THREE.MeshBasicMaterial({ color: GPS_CONFIG.markerColor });
+    const cone = new THREE.Mesh(coneGeometry, coneMaterial);
+    cone.position.y = 15;  // half height to stand on ground
+
+    // Optional: add a small sphere on top to look like a pin head
+    const sphereGeometry = new THREE.SphereGeometry(2, 16, 16);
+    const sphereMaterial = new THREE.MeshBasicMaterial({ color: GPS_CONFIG.markerColor });
+    const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+    sphere.position.y = 20;  // on top of cone
+
+    // Add both to marker group
+    markerGroup.add(cone);
+    markerGroup.add(sphere);
+
+    markerGroup.visible = false;
+    scene.add(markerGroup);
+    gpsMarker = markerGroup;
+
+    // ✅ Create accuracy circle
     const ringGeometry = new THREE.CircleGeometry(1, 32);
     const ringMaterial = new THREE.MeshBasicMaterial({
         color: GPS_CONFIG.accuracyColor,
@@ -81,12 +101,12 @@ function setupGPSMarker() {
         side: THREE.DoubleSide
     });
     gpsAccuracyRing = new THREE.Mesh(ringGeometry, ringMaterial);
-    gpsAccuracyRing.rotation.x = -Math.PI / 2; // Horizontal circle
-    gpsAccuracyRing.position.y = 1;
+    gpsAccuracyRing.rotation.x = -Math.PI / 2; // Flat on the ground
+    gpsAccuracyRing.position.y = 0.1;  // Just above the ground
     gpsAccuracyRing.visible = false;
     scene.add(gpsAccuracyRing);
 
-    // Create path trail
+    // ✅ Create path trail
     const pathMaterial = new THREE.LineBasicMaterial({
         color: GPS_CONFIG.pathColor,
         linewidth: GPS_CONFIG.pathWidth,
@@ -99,7 +119,7 @@ function setupGPSMarker() {
     scene.add(gpsPath);
 
     addGPSControls();
-    console.log("✅ GPS marker system initialized");
+    console.log("✅ GPS marker system initialized (Pinpoint style)");
 }
 
 function updateGPSMarker(position) {
@@ -133,10 +153,157 @@ function updateGPSMarker(position) {
       updateGPSPath(worldPos);
   }
 
+  // Update camera position if follow mode is enabled
+  if (followMode) {
+      updateCameraPosition(worldPos);
+  }
+
   // Update info display
   updateGPSInfoDisplay(position);
 }
 
+// Multi-mode camera follow system
+// The issue is in the updateCameraPosition function
+// We need to modify the 'navigation' view mode to position the camera behind the marker
+// instead of in front of it
+
+// The issue is in the updateCameraPosition function
+// We need to modify the 'navigation' view mode to position the camera behind the marker
+// instead of in front of it
+
+function updateCameraPosition(worldPos) {
+    if (!camera || !worldPos) return;
+    
+    // Get movement direction from GPS points or device heading
+    let movementDirection = { x: 0, z: -1 }; // Default direction (north)
+    let hasValidDirection = false;
+    
+    if (gpsPathPoints.length >= 2) {
+        const lastPoint = gpsPathPoints[gpsPathPoints.length - 1];
+        const prevPoint = gpsPathPoints[gpsPathPoints.length - 2];
+        
+        // Calculate direction only if points are sufficiently far apart
+        const dx = lastPoint.x - prevPoint.x;
+        const dz = lastPoint.z - prevPoint.z;
+        const dist = Math.sqrt(dx * dx + dz * dz);
+        
+        if (dist > 0.1) { // Minimum distance to consider movement
+            movementDirection = {
+                x: dx / dist,
+                z: dz / dist
+            };
+            hasValidDirection = true;
+        }
+    }
+    
+    // If we don't have valid points yet, try to use device heading
+    if (!hasValidDirection && lastPosition && lastPosition.coords && 'heading' in lastPosition.coords) {
+        const heading = lastPosition.coords.heading;
+        if (typeof heading === 'number' && !isNaN(heading)) {
+            // Convert heading (0° = North, 90° = East) to direction vector
+            const headingRad = (90 - heading) * Math.PI / 180;
+            movementDirection = {
+                x: Math.cos(headingRad),
+                z: Math.sin(headingRad)
+            };
+            hasValidDirection = true;
+        }
+    }
+    
+    let targetCameraPos, lookTarget;
+    
+    // Set camera position and orientation based on view mode
+    switch (viewMode) {
+        case 'navigation': // Follow from behind view
+            // Enhanced camera settings for better follow-behind experience
+            const cameraHeight = 50; // Lower height for better visibility
+            const cameraDistance = 60; // Adjusted distance behind the marker
+            const lookAheadDistance = 10; // Reduced look-ahead distance to focus more on the marker
+            
+            // Position camera directly behind the marker based on movement direction
+            targetCameraPos = {
+                x: worldPos.x - movementDirection.x * cameraDistance,
+                y: cameraHeight,
+                z: worldPos.z - movementDirection.z * cameraDistance
+            };
+            
+            // Look at the marker's position with slight look-ahead
+            lookTarget = {
+                x: worldPos.x + movementDirection.x * lookAheadDistance,
+                y: 2, // Lower to see more of the ground ahead
+                z: worldPos.z + movementDirection.z * lookAheadDistance
+            };
+            break;
+            
+        case 'top': // Top-down view like a map
+            targetCameraPos = {
+                x: worldPos.x,
+                y: 120, // Higher above for top view
+                z: worldPos.z
+            };
+            
+            // Look directly down at marker
+            lookTarget = {
+                x: worldPos.x,
+                y: 0,
+                z: worldPos.z
+            };
+            break;
+            
+        case 'first-person': // First-person view
+            // Position camera at marker height plus human eye level
+            targetCameraPos = {
+                x: worldPos.x,
+                y: 5, // Eye level
+                z: worldPos.z
+            };
+            
+            // Look in the direction of movement
+            lookTarget = {
+                x: worldPos.x + movementDirection.x * 10,
+                y: 5, // Eye level
+                z: worldPos.z + movementDirection.z * 10
+            };
+            break;
+    }
+    
+    // Apply smoothing to camera movement (lower value = smoother but slower transitions)
+    const smoothFactor = viewMode === 'first-person' ? 0.2 : 0.1; // Increased for more responsive following
+    camera.position.x += (targetCameraPos.x - camera.position.x) * smoothFactor;
+    camera.position.y += (targetCameraPos.y - camera.position.y) * smoothFactor;
+    camera.position.z += (targetCameraPos.z - camera.position.z) * smoothFactor;
+    
+    // Make camera look at calculated target with improved transition
+    const currentLookAt = new THREE.Vector3();
+    camera.getWorldDirection(currentLookAt);
+    
+    // Calculate target direction vector
+    const targetDirection = new THREE.Vector3(
+        lookTarget.x - camera.position.x,
+        lookTarget.y - camera.position.y,
+        lookTarget.z - camera.position.z
+    ).normalize();
+    
+    // Smoothly interpolate the camera direction
+    const lookSmoothFactor = 0.15; // Adjust for smoother camera rotation
+    const newDirection = new THREE.Vector3(
+        currentLookAt.x + (targetDirection.x - currentLookAt.x) * lookSmoothFactor,
+        currentLookAt.y + (targetDirection.y - currentLookAt.y) * lookSmoothFactor,
+        currentLookAt.z + (targetDirection.z - currentLookAt.z) * lookSmoothFactor
+    ).normalize();
+    
+    // Apply the smoothed look direction
+    camera.lookAt(
+        camera.position.x + newDirection.x * 100,
+        camera.position.y + newDirection.y * 100,
+        camera.position.z + newDirection.z * 100
+    );
+    
+    // If we're using OrbitControls, disable them during follow mode
+    if (window.controls && typeof window.controls.enabled !== 'undefined') {
+        window.controls.enabled = false;
+    }
+}
 // Update path with new position
 function updateGPSPath(worldPos) {
     // Add point to path
@@ -304,12 +471,88 @@ function addGPSControls() {
         }
     });
 
+    // Add follow mode toggle button
+    const followButton = document.createElement('button');
+    followButton.textContent = followMode ? 'Disable Follow' : 'Enable Follow';
+    followButton.style.padding = '8px 12px';
+    followButton.style.cursor = 'pointer';
+    followButton.style.backgroundColor = followMode ? '#2196F3' : '#9E9E9E';
+    followButton.style.color = 'white';
+    followButton.style.border = 'none';
+    followButton.style.borderRadius = '4px';
+
+    followButton.addEventListener('click', () => {
+        followMode = !followMode;
+        if (followMode) {
+            followButton.textContent = 'Disable Follow';
+            followButton.style.backgroundColor = '#2196F3';
+            // If we have a last position and are tracking, update the camera immediately
+            if (lastPosition && isTracking) {
+                const worldPos = geoToWorld(lastPosition.coords.latitude, lastPosition.coords.longitude);
+                updateCameraPosition(worldPos);
+            }
+        } else {
+            followButton.textContent = 'Enable Follow';
+            followButton.style.backgroundColor = '#9E9E9E';
+            // If using OrbitControls, re-enable controls when follow mode is off
+            if (window.controls) {
+                window.controls.enabled = true;
+            }
+        }
+    });
+
+    // We've removed the camera control sliders since we use fixed Google Maps style values now
+    const cameraControlsDiv = document.createElement('div');
+    cameraControlsDiv.style.display = 'flex';
+    cameraControlsDiv.style.flexDirection = 'column';
+    cameraControlsDiv.style.gap = '5px';
+    cameraControlsDiv.style.marginTop = '8px';
+    cameraControlsDiv.style.padding = '8px';
+    cameraControlsDiv.style.border = '1px solid #ddd';
+    cameraControlsDiv.style.borderRadius = '4px';
+    
+    // Add a view mode switcher
+    const viewModeSelector = document.createElement('select');
+    viewModeSelector.style.padding = '5px';
+    viewModeSelector.style.borderRadius = '4px';
+    viewModeSelector.style.border = '1px solid #ddd';
+    viewModeSelector.style.width = '100%';
+    
+    // Create options
+    const options = [
+        { value: 'navigation', text: 'Navigation View' },
+        { value: 'top', text: 'Top View' },
+        { value: 'first-person', text: 'First Person' }
+    ];
+    
+    options.forEach(option => {
+        const optionElem = document.createElement('option');
+        optionElem.value = option.value;
+        optionElem.textContent = option.text;
+        viewModeSelector.appendChild(optionElem);
+    });
+    
+    viewModeSelector.addEventListener('change', (e) => {
+        const viewMode = e.target.value;
+        window.gpsTracker.setViewMode(viewMode);
+    });
+    
+    const viewModeLabel = document.createElement('label');
+    viewModeLabel.textContent = 'View Mode:';
+    viewModeLabel.style.fontSize = '12px';
+    viewModeLabel.style.marginBottom = '5px';
+    
+    cameraControlsDiv.appendChild(viewModeLabel);
+    cameraControlsDiv.appendChild(viewModeSelector);
+
     const infoDisplay = document.createElement('div');
     infoDisplay.id = 'gpsInfo';
     infoDisplay.style.fontSize = '12px';
     infoDisplay.style.fontFamily = 'monospace';
 
     container.appendChild(toggleButton);
+    container.appendChild(followButton);
+    container.appendChild(cameraControlsDiv);
     container.appendChild(infoDisplay);
     document.body.appendChild(container);
 }
@@ -318,6 +561,20 @@ function addGPSControls() {
 function initGPSSystem() {
     setupGPSMarker();
     console.log("✅ GPS system initialized");
+    
+    // Override animation loop to ensure camera follows marker
+    if (typeof animate === 'function') {
+        const originalAnimate = animate;
+        animate = function() {
+            originalAnimate();
+            
+            // Ensure camera follows if in follow mode and we have a marker
+            if (followMode && gpsMarker && gpsMarker.visible && lastPosition) {
+                const worldPos = geoToWorld(lastPosition.coords.latitude, lastPosition.coords.longitude);
+                updateCameraPosition(worldPos);
+            }
+        };
+    }
     
     // Start GPS tracking automatically (optional)
     // startGPSTracking();
@@ -329,5 +586,16 @@ window.addEventListener('load', initGPSSystem);
 // Export functions for external use if needed
 window.gpsTracker = {
     start: startGPSTracking,
-    stop: stopGPSTracking
+    stop: stopGPSTracking,
+    toggleFollow: function() {
+        followMode = !followMode;
+        return followMode;
+    },
+    setViewMode: function(mode) {
+        // Valid modes: 'navigation', 'top', 'first-person'
+        if (['navigation', 'top', 'first-person'].includes(mode)) {
+            viewMode = mode;
+            console.log(`View mode set to: ${mode}`);
+        }
+    }
 };

@@ -641,7 +641,7 @@ async function init() {
 
   // raycaster & mouse
   raycaster = new THREE.Raycaster();
-  mouse     = new THREE.Vector2();
+  mouse = new THREE.Vector2();
 
   // scene & camera
   scene = new THREE.Scene();
@@ -671,10 +671,10 @@ async function init() {
   setupEventListeners();
 
   // load the road graph before the model
-  roadGraph  = await loadRoadGraph();
+  roadGraph = await loadRoadGraph();
   pathfinder = new AStarPathfinder(roadGraph);
   roadPoints = roadGraph.points.map(p => ({
-      id:       p.id,
+      id: p.id,
       position: new THREE.Vector3(p.position.x, p.position.y, p.position.z)
   }));
   console.log('Road graph loaded, A* ready');
@@ -701,8 +701,22 @@ async function init() {
   } else {
       console.warn('Building click logger not loaded');
   }
-}
 
+  // ✅ 🚀 NEW: Initialize the navigation system
+  if (window.navigationSystem && typeof navigationSystem.init === 'function') {
+      navigationSystem.init({
+          scene: scene,
+          pathfinder: pathfinder,
+          gps: window.gpsTracker // optional: pass gps object if you expose it
+      });
+
+      // 👉 Start navigation automatically (for testing)
+      navigationSystem.navigateTo('l798419266');  // Change 'Library' as needed
+      navigationSystem.start();
+  } else {
+      console.warn('Navigation system not found or missing init()');
+  }
+}
 
   
 // ─────────────────────────────────────────────────────────────────
